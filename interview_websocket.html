@@ -1,0 +1,147 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vapi WebSocket Interview</title>
+</head>
+<body>
+    <h1>Vapi WebSocket Interview</h1>
+    <p>Call ID: <call_id></p>
+    <p>Status: <span id="status">Connecting...</span></p>
+    <button id="startBtn" onclick="startCall()">Start Interview</button>
+    <button id="endBtn" onclick="endCall()" disabled>End Interview</button>
+    <script>
+        let socket;
+        let audioContext;
+        let processor;
+        let source;
+
+        function startCall() {
+            const startBtn = document.getElementById('startBtn');
+            const endBtn = document.getElementById('endBtn');
+            if (!startBtn || !endBtn) {
+                console.error('Button elements not found: startBtn or endBtn missing');
+                document.getElementById('status').textContent = 'Error: Buttons not found';
+                return;
+            }
+            startBtn.disabled = true;
+            endBtn.disabled = false;
+            document.getElementById('status').textContent = 'Connecting to WebSocket...';
+            
+            try {
+                socket = new WebSocket('wss://phone-call-websocket.aws-us-west-2-backend-production2.vapi.ai/92f63b04-5737-47d2-bc37-193823664de7/transport');
+            } catch (err) {
+                console.error('WebSocket initialization failed:', err);
+                document.getElementById('status').textContent = 'WebSocket error: ' + err.message;
+                return;
+            }
+
+            socket.onopen = () => {
+                document.getElementById('status').textContent = 'Connected. Speak to answer questions.';
+                console.log('WebSocket connection opened.');
+                startAudio();
+            };
+
+            socket.onclose = (event) => {
+                document.getElementById('status').textContent = 'Disconnected: Code ' + event.code + ', Reason: ' + event.reason;
+                console.log('WebSocket closed:', event);
+                stopAudio();
+            };
+
+            socket.onerror = (error) => {
+                document.getElementById('status').textContent = 'WebSocket error';
+                console.error('WebSocket error:', error);
+            };
+
+            socket.onmessage = (event) => {
+                if (event.data instanceof Blob) {
+                    event.data.arrayBuffer().then(buffer => {
+                        const audioData = new Int16Array(buffer);
+                        playAudio(audioData);
+                    }).catch(err => {
+                        console.error('Audio buffer error:', err);
+                    });
+                } else {
+                    try {
+                        const message = JSON.parse(event.data);
+                        console.log('Control message:', message);
+                        if (message.type === 'hangup') {
+                            endCall();
+                        }
+                    } catch (error) {
+                        console.error('Failed to parse message:', error);
+                    }
+                }
+            };
+        }
+
+        function startAudio() {
+            navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                source = audioContext.createMediaStreamSource(stream);
+                processor = audioContext.createScriptProcessor(1024, 1, 1);
+
+                processor.onaudioprocess = (event) => {
+                    const pcmData = event.inputBuffer.getChannelData(0);
+                    const int16Data = new Int16Array(pcmData.length);
+                    for (let i = 0; i < pcmData.length; i++) {
+                        int16Data[i] = Math.max(-32768, Math.min(32767, pcmData[i] * 32768));
+                    }
+                    if (socket.readyState === WebSocket.OPEN) {
+                        socket.send(int16Data.buffer);
+                    }
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+            }).catch(err => {
+                document.getElementById('status').textContent = 'Microphone error: ' + err.message;
+                console.error('Microphone error:', err);
+            });
+        }
+
+        function playAudio(audioData) {
+            try {
+                const buffer = audioContext.createBuffer(1, audioData.length, 16000);
+                const channelData = buffer.getChannelData(0);
+                for (let i = 0; i < audioData.length; i++) {
+                    channelData[i] = audioData[i] / 32768;
+                }
+                const source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
+                source.start();
+            } catch (err) {
+                console.error('Audio playback error:', err);
+            }
+        }
+
+        function endCall() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                try {
+                    socket.send(JSON.stringify({ type: "hangup" }));
+                    socket.close();
+                } catch (err) {
+                    console.error('Error sending hangup:', err);
+                }
+            }
+            stopAudio();
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('endBtn').disabled = true;
+            document.getElementById('status').textContent = 'Call ended.';
+        }
+
+        function stopAudio() {
+            try {
+                if (processor) processor.disconnect();
+                if (source) source.disconnect();
+                if (audioContext) audioContext.close();
+            } catch (err) {
+                console.error('Error stopping audio:', err);
+            }
+        }
+    </script>
+</body>
+</html>

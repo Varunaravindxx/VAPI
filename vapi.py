@@ -8,8 +8,8 @@ import webbrowser
 import os
 
 # Vapi API Configuration
-VAPI_PUBLIC_KEY = "96019add-ebef-4162-b69e-39ca8987a594"  # Replace with your Vapi public key
-VAPI_PRIVATE_KEY = "ed03fc81-ec6f-4bc3-ba53-9b719e93e648"  # Replace with your Vapi private key
+VAPI_PUBLIC_KEY = "96019add-ebef-4162-b69e-39ca8987a594"
+VAPI_PRIVATE_KEY = "ed03fc81-ec6f-4bc3-ba53-9b719e93e648"
 VAPI_BASE_URL = "https://api.vapi.ai"
 
 # Headers for API calls
@@ -103,7 +103,7 @@ def start_websocket_call(assistant_id):
     }
     
     max_retries = 3
-    max_status_checks = 5
+    max_status_checks = 15
     for attempt in range(max_retries):
         response = requests.post(
             f"{VAPI_BASE_URL}/call",
@@ -112,7 +112,6 @@ def start_websocket_call(assistant_id):
         )
         
         if response.status_code == 201:
-            print(response.json())
             call_data = response.json()
             call_id = call_data.get("id")
             websocket_url = call_data.get("transport", {}).get("websocketCallUrl")
@@ -126,15 +125,16 @@ def start_websocket_call(assistant_id):
                 )
                 if status_response.status_code == 200:
                     call_status = status_response.json().get("status")
+                    ended_reason = status_response.json().get("endedReason", "")
                     print(f"Call {call_id} status: {call_status} (Check {check + 1}/{max_status_checks})")
                     if call_status == "active":
                         return call_id, websocket_url
                     elif call_status in ["ended", "failed"]:
-                        print(f"Call {call_id} terminated early with status: {call_status}")
+                        print(f"Call {call_id} terminated early with status: {call_status}, reason: {ended_reason}")
                         break
                 else:
                     print(f"Failed to check call status: {status_response.text}")
-                time.sleep(5)
+                time.sleep(2)
             
             print(f"Call {call_id} did not become active. Retrying... (Attempt {attempt + 1}/{max_retries})")
         else:
@@ -167,11 +167,24 @@ def generate_websocket_html(websocket_url, call_id):
             let source;
 
             function startCall() {{
-                document.getElementById('startBtn').disabled = true;
-                document.getElementById('endBtn').disabled = false;
+                const startBtn = document.getElementById('startBtn');
+                const endBtn = document.getElementById('endBtn');
+                if (!startBtn || !endBtn) {{
+                    console.error('Button elements not found: startBtn or endBtn missing');
+                    document.getElementById('status').textContent = 'Error: Buttons not found';
+                    return;
+                }}
+                startBtn.disabled = true;
+                endBtn.disabled = false;
                 document.getElementById('status').textContent = 'Connecting to WebSocket...';
-
-                socket = new WebSocket('{websocket_url}');
+                
+                try {{
+                    socket = new WebSocket('{websocket_url}');
+                }} catch (err) {{
+                    console.error('WebSocket initialization failed:', err);
+                    document.getElementById('status').textContent = 'WebSocket error: ' + err.message;
+                    return;
+                }}
 
                 socket.onopen = () => {{
                     document.getElementById('status').textContent = 'Connected. Speak to answer questions.';
@@ -179,14 +192,14 @@ def generate_websocket_html(websocket_url, call_id):
                     startAudio();
                 }};
 
-                socket.onclose = () => {{
-                    document.getElementById('status').textContent = 'Disconnected.';
-                    console.log('WebSocket connection closed.');
+                socket.onclose = (event) => {{
+                    document.getElementById('status').textContent = 'Disconnected: Code ' + event.code + ', Reason: ' + event.reason;
+                    console.log('WebSocket closed:', event);
                     stopAudio();
                 }};
 
                 socket.onerror = (error) => {{
-                    document.getElementById('status').textContent = 'Error: ' + error;
+                    document.getElementById('status').textContent = 'WebSocket error';
                     console.error('WebSocket error:', error);
                 }};
 
@@ -195,6 +208,8 @@ def generate_websocket_html(websocket_url, call_id):
                         event.data.arrayBuffer().then(buffer => {{
                             const audioData = new Int16Array(buffer);
                             playAudio(audioData);
+                        }}).catch(err => {{
+                            console.error('Audio buffer error:', err);
                         }});
                     }} else {{
                         try {{
@@ -230,27 +245,35 @@ def generate_websocket_html(websocket_url, call_id):
                     source.connect(processor);
                     processor.connect(audioContext.destination);
                 }}).catch(err => {{
-                    document.getElementById('status').textContent = 'Microphone error: ' + err;
+                    document.getElementById('status').textContent = 'Microphone error: ' + err.message;
                     console.error('Microphone error:', err);
                 }});
             }}
 
             function playAudio(audioData) {{
-                const buffer = audioContext.createBuffer(1, audioData.length, 16000);
-                const channelData = buffer.getChannelData(0);
-                for (let i = 0; i < audioData.length; i++) {{
-                    channelData[i] = audioData[i] / 32768;
+                try {{
+                    const buffer = audioContext.createBuffer(1, audioData.length, 16000);
+                    const channelData = buffer.getChannelData(0);
+                    for (let i = 0; i < audioData.length; i++) {{
+                        channelData[i] = audioData[i] / 32768;
+                    }}
+                    const source = audioContext.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(audioContext.destination);
+                    source.start();
+                }} catch (err) {{
+                    console.error('Audio playback error:', err);
                 }}
-                const source = audioContext.createBufferSource();
-                source.buffer = buffer;
-                source.connect(audioContext.destination);
-                source.start();
             }}
 
             function endCall() {{
                 if (socket && socket.readyState === WebSocket.OPEN) {{
-                    socket.send(JSON.stringify({{ type: "hangup" }}));
-                    socket.close();
+                    try {{
+                        socket.send(JSON.stringify({{ type: "hangup" }}));
+                        socket.close();
+                    }} catch (err) {{
+                        console.error('Error sending hangup:', err);
+                    }}
                 }}
                 stopAudio();
                 document.getElementById('startBtn').disabled = false;
@@ -259,9 +282,13 @@ def generate_websocket_html(websocket_url, call_id):
             }}
 
             function stopAudio() {{
-                if (processor) processor.disconnect();
-                if (source) source.disconnect();
-                if (audioContext) audioContext.close();
+                try {{
+                    if (processor) processor.disconnect();
+                    if (source) source.disconnect();
+                    if (audioContext) audioContext.close();
+                }} catch (err) {{
+                    console.error('Error stopping audio:', err);
+                }}
             }}
         </script>
     </body>
@@ -284,9 +311,11 @@ def get_call_transcript(call_id):
             call_data = response.json()
             if call_data.get("transcript"):
                 return call_data["transcript"]
+            elif call_data.get("status") in ["ended", "failed"]:
+                raise Exception(f"Call ended with status: {call_data['status']}, reason: {call_data.get('endedReason', 'Unknown')}")
         time.sleep(10)
     
-    raise Exception("Failed to retrieve transcript")
+    raise Exception("Failed to retrieve transcript after maximum attempts.")
 
 def evaluate_answers(transcript, questions):
     """Evaluate candidate answers (hypothetical implementation)."""
@@ -341,6 +370,9 @@ def main():
         call_id, websocket_url = start_websocket_call(assistant_id)
         print(f"Opening WebSocket interview page for Call ID: {call_id}")
         
+        # Wait to ensure call is active
+        time.sleep(5)
+        
         # Generate and open HTML page
         html_path = generate_websocket_html(websocket_url, call_id)
         webbrowser.open(f"file://{html_path}")
@@ -370,8 +402,8 @@ def main():
         print(f"Error: {str(e)}")
         print("Troubleshooting tips:")
         print("- Ensure VAPI_PUBLIC_KEY and VAPI_PRIVATE_KEY are correct in the script.")
-        print("- Verify microphone permissions in your browser (allow for file:// and wss://api.vapi.ai).")
-        print("- Check call status in Vapi Dashboard (Calls section) for the call ID.")
+        print("- Verify microphone permissions in your browser (allow for file:// and wss://phone-call-websocket.aws-us-west-2-backend-production2.vapi.ai).")
+        print("- Check call status in Vapi Dashboard (_calls section) for the call ID.")
         print("- Test WebSocket call creation in Postman (POST /call with vapi.websocket).")
         print("- Contact Vapi support with call ID and error details.")
 
