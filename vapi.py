@@ -127,7 +127,7 @@ def start_websocket_call(assistant_id):
                     call_status = status_response.json().get("status")
                     ended_reason = status_response.json().get("endedReason", "")
                     print(f"Call {call_id} status: {call_status} (Check {check + 1}/{max_status_checks})")
-                    if call_status == "active":
+                    if call_status == "active" or call_status == "queued":
                         return call_id, websocket_url
                     elif call_status in ["ended", "failed"]:
                         print(f"Call {call_id} terminated early with status: {call_status}, reason: {ended_reason}")
